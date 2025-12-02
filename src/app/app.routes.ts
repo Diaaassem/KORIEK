@@ -1,5 +1,6 @@
 import { Routes } from '@angular/router';
 import { authGuard } from './guards/auth.guard';
+import { adminGuard } from './guards/admin.guard';
 import { UnsavedChangesGuard } from './guards/unsaved-changes.guard';
 
 export const routes: Routes = [
@@ -88,5 +89,20 @@ export const routes: Routes = [
     path: 'workshop/wallet',
     loadComponent: () => import('./components/wallet/wallet.component').then(m => m.WalletComponent),
     canActivate: [authGuard]
+  },
+  {
+    path: 'workshop/settings',
+    loadComponent: () => import('./components/workshop-settings/workshop-settings.component').then(m => m.WorkshopSettingsComponent),
+    canActivate: [authGuard],
+    canDeactivate: [UnsavedChangesGuard]
+  },
+  {
+    path: 'admin/dashboard',
+    loadComponent: () => import('./components/admin-dashboard/admin-dashboard.component').then(m => m.AdminDashboardComponent),
+    canActivate: [authGuard, adminGuard]
+  },
+  {
+    path: 'unauthorized',
+    loadComponent: () => import('./components/unauthorized/unauthorized.component').then(m => m.UnauthorizedComponent)
   },
 ];

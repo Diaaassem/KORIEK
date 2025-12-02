@@ -1,7 +1,8 @@
 import { Injectable } from '@angular/core';
-import { HttpClient, HttpHeaders } from '@angular/common/http';
+import { HttpClient, HttpHeaders, HttpEvent } from '@angular/common/http';
 import { Observable } from 'rxjs';
-import { WorkshopProfileData, WorkShopWorkingHoursAPI, WorkingHours } from '../models/workshop-profile.model';
+import { map, shareReplay, tap, catchError } from 'rxjs/operators';
+import { WorkshopProfileData, WorkShopWorkingHoursAPI, WorkingHours, WorkshopService, CategoryAPIResponse, CategoryData, SubcategoryAPIResponse, SubcategoryData, ServiceAPIResponse, ServiceData } from '../models/workshop-profile.model';
 
 @Injectable({
   providedIn: 'root',
@@ -11,6 +12,20 @@ export class WorkshopProfileService {
 
   // WorkShopProfile endpoints (separate controller)
   private profileApiBase = 'https://localhost:44316/api/WorkShopProfile';
+  
+  // Category API endpoint
+  private categoryApiUrl = 'https://localhost:44316/api/Category';
+  
+  // Subcategory API endpoint
+  private subcategoryApiUrl = 'https://localhost:44316/api/Subcategory';
+  
+  // Service API endpoint
+  private serviceApiUrl = 'https://localhost:44316/api/Service';
+  
+  // Cache for categories, subcategories, and services
+  private categoriesCache$?: Observable<CategoryAPIResponse>;
+  private subcategoriesCache = new Map<number, Observable<SubcategoryAPIResponse>>();
+  private servicesCache = new Map<number, Observable<ServiceAPIResponse>>();
 
   constructor(private http: HttpClient) {}
 
@@ -77,87 +92,74 @@ export class WorkshopProfileService {
    * Get working hours for a workshop
    */
   getWorkshopWorkingHours(workshopId: number): Observable<WorkShopWorkingHoursAPI[]> {
-    return this.http.get<WorkShopWorkingHoursAPI[]>(
-      `https://localhost:44316/api/WorkShopWorkingHours?workShopProfileId=${workshopId}`
-    );
+    return this.http
+      .get<any>(`https://localhost:44316/api/WorkShopWorkingHours/workshop/${workshopId}`)
+      .pipe(
+        map((response: any) => {
+          // Handle response that might be wrapped in data property
+          console.log('Raw API Response for working hours:', response);
+          return response?.data ?? response ?? [];
+        })
+      );
   }
 
   /**
    * Create working hours for a workshop
    */
   createWorkingHours(workingHour: WorkShopWorkingHoursAPI): Observable<any> {
-    return this.http.post(
-      'https://localhost:44316/api/WorkShopWorkingHours',
-      workingHour
+    return this.http.post('https://localhost:44316/api/WorkShopWorkingHours', workingHour);
+  }
+
+  /**
+   * Delete all working hours for a workshop
+   */
+  deleteAllWorkingHours(workshopId: number): Observable<any> {
+    return this.http.delete(
+      `https://localhost:44316/api/WorkShopWorkingHours/workshop/${workshopId}`
     );
+  }
+
+  /**
+   * Delete individual working hour by ID
+   */
+  deleteWorkingHour(id: number): Observable<any> {
+    return this.http.delete(`https://localhost:44316/api/WorkShopWorkingHours/${id}`);
   }
 
   /**
    * Update working hours for a workshop
    */
   updateWorkshopWorkingHours(workingHours: WorkShopWorkingHoursAPI[]): Observable<any> {
-    return this.http.put(
-      'https://localhost:44316/api/WorkShopWorkingHours',
-      workingHours
-    );
+    return this.http.put('https://localhost:44316/api/WorkShopWorkingHours', workingHours);
   }
 
   /**
    * Convert API working hours format to display format
    */
-  convertAPIWorkingHours(apiHours: WorkShopWorkingHoursAPI[]): WorkingHours[] {
-    return apiHours.map(hour => ({
-      day: hour.day,
-      openTime: this.formatTimeFromISO(hour.from),
-      closeTime: this.formatTimeFromISO(hour.to),
-      isClosed: hour.isClosed
-    }));
+  convertAPIWorkingHours(apiHours: any[]): WorkingHours[] {
+    console.log('Converting API hours to display format:', apiHours);
+    const converted = apiHours.map((hour) => {
+      const dayNumber = this.getDayNumber(hour.day);
+      return {
+        id: hour.id,
+        day: hour.day,
+        dayNumber: dayNumber,
+        dayName: hour.day,
+        openTime: hour.from,
+        closeTime: hour.to,
+        isClosed: hour.isClosed,
+      };
+    });
+    console.log('Converted hours:', converted);
+    return converted;
   }
 
   /**
-   * Convert display working hours format to API format
+   * Get day number from day name
    */
-  convertToAPIWorkingHours(hours: WorkingHours[], workShopProfileId: number): WorkShopWorkingHoursAPI[] {
-    return hours.map(hour => ({
-      day: (hour.dayNumber !== undefined ? hour.dayNumber.toString() : hour.day) || '0',
-      from: this.formatTimeToISO(hour.openTime),
-      to: this.formatTimeToISO(hour.closeTime),
-      isClosed: hour.isClosed,
-      workShopProfileId: workShopProfileId
-    }));
-  }
-
-  /**
-   * Format ISO time string to HH:mm format
-   */
-  private formatTimeFromISO(isoString: string): string {
-    if (!isoString) return '09:00';
-    try {
-      const date = new Date(isoString);
-      const hours = date.getHours().toString().padStart(2, '0');
-      const minutes = date.getMinutes().toString().padStart(2, '0');
-      return `${hours}:${minutes}`;
-    } catch {
-      return '09:00';
-    }
-  }
-
-  /**
-   * Format HH:mm time string to ISO 8601
-   */
-  private formatTimeToISO(timeString: string): string {
-    if (!timeString) return new Date().toISOString();
-    try {
-      const [hours, minutes] = timeString.split(':');
-      const date = new Date();
-      date.setHours(parseInt(hours, 10));
-      date.setMinutes(parseInt(minutes, 10));
-      date.setSeconds(0);
-      date.setMilliseconds(0);
-      return date.toISOString();
-    } catch {
-      return new Date().toISOString();
-    }
+  private getDayNumber(dayName: string): number {
+    const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+    return days.indexOf(dayName);
   }
 
   /**
@@ -177,6 +179,53 @@ export class WorkshopProfileService {
     });
 
     return this.http.post(`${this.apiUrl}/${workshopId}/gallery`, formData);
+  }
+
+  /**
+   * Upload gallery images using WorkShopPhotoController expected shape
+   * Backend expects a form with WorkShopProfileId (int) and Photos[] files
+   */
+  uploadWorkShopPhotos(workShopProfileId: number | string, images: File[]): Observable<any> {
+    const form = new FormData();
+    // Ensure numeric id is passed as string
+    form.append('WorkShopProfileId', String(workShopProfileId));
+
+    images.forEach((image) => {
+      form.append('Photos', image, image.name);
+    });
+
+    return this.http.post(`https://localhost:44316/api/WorkShopPhoto`, form);
+  }
+
+  /**
+   * Upload gallery images with progress reporting (returns HttpEvents)
+   */
+  uploadWorkShopPhotosWithProgress(
+    workShopProfileId: number | string,
+    images: File[]
+  ): Observable<HttpEvent<any>> {
+    const form = new FormData();
+    form.append('WorkShopProfileId', String(workShopProfileId));
+    images.forEach((image) => form.append('Photos', image, image.name));
+
+    return this.http.post(`https://localhost:44316/api/WorkShopPhoto`, form, {
+      reportProgress: true,
+      observe: 'events',
+    });
+  }
+
+  /**
+   * Get all photos for a workshop profile
+   */
+  getWorkShopPhotos(workShopProfileId: number | string): Observable<any> {
+    return this.http.get(`https://localhost:44316/api/WorkShopPhoto/${workShopProfileId}`);
+  }
+
+  /**
+   * Delete a workshop photo by its ID
+   */
+  deleteWorkShopPhotoById(photoId: number): Observable<any> {
+    return this.http.delete(`https://localhost:44316/api/WorkShopPhoto/${photoId}`);
   }
 
   /**
@@ -206,5 +255,231 @@ export class WorkshopProfileService {
     formData.append('logo', logo, logo.name);
 
     return this.http.post(`${this.apiUrl}/${workshopId}/logo`, formData);
+  }
+
+  // ============================================
+  // Workshop Services CRUD Operations
+  // ============================================
+
+  /**
+   * Get all services for a workshop
+   */
+  getWorkshopServices(workshopId: number): Observable<WorkshopService[]> {
+    return this.http.get<WorkshopService[]>(`${this.apiUrl}/${workshopId}/services`);
+  }
+
+  /**
+   * Get a specific workshop service by ID
+   */
+  getWorkshopService(workshopId: number, serviceId: number): Observable<WorkshopService> {
+    return this.http.get<WorkshopService>(`${this.apiUrl}/${workshopId}/services/${serviceId}`);
+  }
+
+  /**
+   * Add multiple services to a workshop
+   */
+  addWorkshopServices(workshopId: number, services: WorkshopService[]): Observable<any> {
+    return this.http.post(`${this.apiUrl}/${workshopId}/services/batch`, services);
+  }
+
+  /**
+   * Add a single service to a workshop
+   */
+  addWorkshopService(workshopId: number, service: WorkshopService): Observable<any> {
+    return this.http.post(`${this.apiUrl}/${workshopId}/services`, service);
+  }
+
+  /**
+   * Update a workshop service
+   */
+  updateWorkshopService(workshopId: number, serviceId: number, service: WorkshopService): Observable<any> {
+    return this.http.put(`${this.apiUrl}/${workshopId}/services/${serviceId}`, service);
+  }
+
+  /**
+   * Delete a workshop service
+   */
+  deleteWorkshopService(workshopId: number, serviceId: number): Observable<any> {
+    return this.http.delete(`${this.apiUrl}/${workshopId}/services/${serviceId}`);
+  }
+
+  /**
+   * Toggle service availability
+   */
+  toggleServiceAvailability(workshopId: number, serviceId: number): Observable<any> {
+    return this.http.patch(`${this.apiUrl}/${workshopId}/services/${serviceId}/toggle`, {});
+  }
+
+  /**
+   * Load service categories from API with caching
+   */
+  loadServiceCategories(forceRefresh = false): Observable<CategoryAPIResponse> {
+    // Clear cache if force refresh
+    if (forceRefresh) {
+      this.categoriesCache$ = undefined;
+    }
+    
+    // Return cached observable if exists
+    if (this.categoriesCache$) {
+      return this.categoriesCache$;
+    }
+    
+    // Create new observable with caching
+    this.categoriesCache$ = this.http.get<CategoryAPIResponse>(this.categoryApiUrl).pipe(
+      tap(response => {
+        console.log('Categories loaded from API:', response);
+      }),
+      shareReplay(1) // Share result and replay to late subscribers
+    );
+    
+    return this.categoriesCache$;
+  }
+  
+  /**
+   * Clear categories cache
+   */
+  clearCategoriesCache(): void {
+    this.categoriesCache$ = undefined;
+  }
+  
+  /**
+   * Get subcategories by category ID with caching
+   */
+  getSubcategoriesByCategory(categoryId: number, forceRefresh = false): Observable<SubcategoryAPIResponse> {
+    // Clear cache if force refresh
+    if (forceRefresh) {
+      this.subcategoriesCache.delete(categoryId);
+    }
+    
+    // Return cached observable if exists
+    if (this.subcategoriesCache.has(categoryId)) {
+      return this.subcategoriesCache.get(categoryId)!;
+    }
+    
+    // Create new observable with caching
+    const subcategories$ = this.http.get<SubcategoryAPIResponse>(
+      `${this.subcategoryApiUrl}/ByCategory/${categoryId}`
+    ).pipe(
+      tap(response => {
+        console.log(`Subcategories for category ${categoryId} loaded from API:`, response);
+      }),
+      shareReplay(1)
+    );
+    
+    this.subcategoriesCache.set(categoryId, subcategories$);
+    return subcategories$;
+  }
+  
+  /**
+   * Clear subcategories cache
+   */
+  clearSubcategoriesCache(categoryId?: number): void {
+    if (categoryId) {
+      this.subcategoriesCache.delete(categoryId);
+    } else {
+      this.subcategoriesCache.clear();
+    }
+  }
+  
+  /**
+   * Get services by subcategory ID with caching
+   */
+  getServicesBySubcategory(subcategoryId: number, forceRefresh = false): Observable<ServiceAPIResponse> {
+    // Clear cache if force refresh
+    if (forceRefresh) {
+      this.servicesCache.delete(subcategoryId);
+    }
+    
+    // Return cached observable if exists
+    if (this.servicesCache.has(subcategoryId)) {
+      return this.servicesCache.get(subcategoryId)!;
+    }
+    
+    // Create new observable with caching
+    const services$ = this.http.get<ServiceAPIResponse>(
+      `${this.serviceApiUrl}/subcategory/${subcategoryId}`
+    ).pipe(
+      tap(response => {
+        console.log(`Services for subcategory ${subcategoryId} loaded from API:`, response);
+      }),
+      shareReplay(1)
+    );
+    
+    this.servicesCache.set(subcategoryId, services$);
+    return services$;
+  }
+  
+  /**
+   * Clear services cache
+   */
+  clearServicesCache(subcategoryId?: number): void {
+    if (subcategoryId) {
+      this.servicesCache.delete(subcategoryId);
+    } else {
+      this.servicesCache.clear();
+    }
+  }
+
+  // ============================================
+  // Workshop Search API
+  // ============================================
+
+  /**
+   * Search for workshops by service ID, vehicle origin, and appointment date.
+   * Calls GET /api/WorkshopService/Search-Workshops-By-Service-And-Origin
+   * 
+   * @param serviceId The ID of the selected service
+   * @param origin The vehicle origin (e.g., 'Germany', 'Japan', 'Italy', 'General')
+   * @param appointmentDate The appointment date/time in ISO format or formatted string
+   * @param city Optional city filter
+   * @param latitude Optional latitude for location-based search
+   * @param longitude Optional longitude for location-based search
+   * @param pageNumber Optional page number for pagination (default 1)
+   * @param pageSize Optional page size for pagination (default 10)
+   * @returns Observable of workshop search results
+   */
+  searchWorkshopsByServiceAndOrigin(
+    serviceId: number | string,
+    origin: string,
+    appointmentDate: string,
+    options?: {
+      city?: string;
+      latitude?: number;
+      longitude?: number;
+      pageNumber?: number;
+      pageSize?: number;
+    }
+  ): Observable<any> {
+    const params = new URLSearchParams();
+    params.set('ServiceId', String(serviceId));
+    params.set('Origin', origin);
+    params.set('AppointmentDate', appointmentDate);
+    
+    // Optional parameters
+    if (options?.city) {
+      params.set('City', options.city);
+    }
+    if (options?.latitude !== undefined) {
+      params.set('Latitude', String(options.latitude));
+    }
+    if (options?.longitude !== undefined) {
+      params.set('Longitude', String(options.longitude));
+    }
+    params.set('PageNumber', String(options?.pageNumber ?? 1));
+    params.set('PageSize', String(options?.pageSize ?? 10));
+
+    const url = `https://localhost:44316/api/WorkshopService/Search-Workshops-By-Service-And-Origin?${params.toString()}`;
+    
+    console.log('Workshop search URL:', url);
+    
+    return this.http.get<any>(url).pipe(
+      tap((response: any) => {
+        console.log('Workshop search raw response:', response);
+      }),
+      catchError((error) => {
+        console.error('Workshop search error:', error);
+        throw error;
+      })
+    );
   }
 }

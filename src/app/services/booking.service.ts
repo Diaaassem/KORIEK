@@ -1,7 +1,7 @@
 import { Injectable } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
-import { BehaviorSubject, Observable, of } from 'rxjs';
-import { map } from 'rxjs/operators';
+import { BehaviorSubject, Observable, of, forkJoin } from 'rxjs';
+import { map, switchMap, catchError } from 'rxjs/operators';
 import {
   Job,
   JobStatus,
@@ -14,15 +14,42 @@ import {
   Payout
 } from '../models/booking.model';
 
+// Interface for booking response from API
+export interface BookingResponse {
+  id: number;
+  status: string;
+  appointmentDate: string;
+  issueDescription: string;
+  paymentMethod: string;
+  paidAmount: number;
+  paymentStatus: string;
+  createdAt: string;
+  carId: number;
+  workShopProfileId: number;
+  workshopServiceId: number;
+}
+
+// Interface for enriched booking with customer and service info
+export interface EnrichedBooking {
+  id: number;
+  status: string;
+  appointmentDate: Date;
+  issueDescription: string;
+  paymentMethod: string;
+  customerName: string;
+  serviceName: string;
+  carId: number;
+}
+
 @Injectable({
   providedIn: 'root'
 })
 export class BookingService {
-  private apiUrl = 'https://localhost:44316/api';
+  public apiUrl = 'https://localhost:44316/api';
   private jobsSubject = new BehaviorSubject<Job[]>([]);
   public jobs$ = this.jobsSubject.asObservable();
 
-  constructor(private http: HttpClient) {
+  constructor(public http: HttpClient) {
     this.loadInitialData();
   }
 
@@ -32,8 +59,254 @@ export class BookingService {
     this.jobsSubject.next(mockJobs);
   }
 
+  // =============== Booking Creation ===============
+
+  /**
+   * Create a new booking with date/time in Africa/Cairo timezone
+   * @param bookingData Booking information matching API request format
+   */
+  createBooking(bookingData: {
+    AppointmentDate: string;       // ISO string (UTC) - e.g., "2025-11-30T15:33:11.286Z"
+    IssueDescription: string;       // Description of the issue/notes
+    PaymentMethod: string;          // "Cash" or "CreditCard"
+    CarId: number;                  // Vehicle ID
+    WorkShopProfileId: number;      // Workshop profile ID
+    WorkshopServiceId: number;      // Workshop service ID
+    Photos?: string[];              // Optional array of photo URLs
+  }): Observable<{
+    success: boolean;
+    message: string;
+    data: {
+      id: number;
+      status: string;
+      appointmentDate: string;
+      issueDescription: string;
+      paymentMethod: string;
+      paidAmount: number;
+      paymentStatus: string;
+      createdAt: string;
+      carId: number;
+      workShopProfileId: number;
+      workshopServiceId: number;
+    };
+  }> {
+    console.log('Creating booking with data:', bookingData);
+    console.log('AppointmentDate (ISO/UTC):', bookingData.AppointmentDate);
+    console.log('AppointmentDate (Cairo):', new Date(bookingData.AppointmentDate).toLocaleString('en-US', { timeZone: 'Africa/Cairo' }));
+
+    // Build FormData for multipart/form-data submission
+    const formData = new FormData();
+    formData.append('AppointmentDate', bookingData.AppointmentDate);
+    formData.append('IssueDescription', bookingData.IssueDescription);
+    formData.append('PaymentMethod', bookingData.PaymentMethod);
+    formData.append('CarId', bookingData.CarId.toString());
+    formData.append('WorkShopProfileId', bookingData.WorkShopProfileId.toString());
+    formData.append('WorkshopServiceId', bookingData.WorkshopServiceId.toString());
+
+    // Add photos if provided
+    if (bookingData.Photos && bookingData.Photos.length > 0) {
+      bookingData.Photos.forEach((photo, index) => {
+        formData.append('Photos', photo);
+      });
+    }
+
+    // Send to backend API as multipart/form-data
+    return this.http.post<{
+      success: boolean;
+      message: string;
+      data: {
+        id: number;
+        status: string;
+        appointmentDate: string;
+        issueDescription: string;
+        paymentMethod: string;
+        paidAmount: number;
+        paymentStatus: string;
+        createdAt: string;
+        carId: number;
+        workShopProfileId: number;
+        workshopServiceId: number;
+      };
+    }>(`${this.apiUrl}/Booking`, formData);
+  }
+
+  // =============== Workshop Schedule Bookings ===============
+
+  /**
+   * Get all bookings for a workshop by workshop profile ID
+   */
+  getBookingsByWorkshop(workshopId: number): Observable<BookingResponse[]> {
+    return this.http.get<any>(`${this.apiUrl}/Booking/ByWorkshop/${workshopId}`).pipe(
+      map(response => response?.data || response || []),
+      catchError(err => {
+        console.error('Error fetching workshop bookings:', err);
+        return of([]);
+      })
+    );
+  }
+
+  /**
+   * Get car owner profile by booking ID
+   */
+  getCarOwnerProfileByBooking(bookingId: number): Observable<any> {
+    return this.http.get<any>(`${this.apiUrl}/Booking/${bookingId}/CarOwnerProfile`).pipe(
+      map(response => response?.data || response),
+      catchError(() => of(null))
+    );
+  }
+
+  /**
+   * Get workshop service by ID
+   */
+  getWorkshopServiceById(workshopServiceId: number): Observable<any> {
+    return this.http.get<any>(`${this.apiUrl}/WorkshopService/${workshopServiceId}`).pipe(
+      map(response => response?.data || response),
+      catchError(() => of(null))
+    );
+  }
+
+  /**
+   * Get service by ID (to get the service name)
+   */
+  getServiceById(serviceId: number): Observable<any> {
+    return this.http.get<any>(`${this.apiUrl}/Service/${serviceId}`).pipe(
+      map(response => response?.data || response),
+      catchError(() => of(null))
+    );
+  }
+
+  /**
+   * Get enriched bookings with customer names and service names
+   * Uses the correct endpoints as specified:
+   * - Customer name from: /api/Booking/{id}/CarOwnerProfile
+   * - Service name from: /api/WorkshopService/{id} -> serviceId -> /api/Service/{id}
+   */
+  getEnrichedBookingsByWorkshop(workshopId: number): Observable<EnrichedBooking[]> {
+    return this.getBookingsByWorkshop(workshopId).pipe(
+      switchMap((bookings: BookingResponse[]) => {
+        if (!bookings || bookings.length === 0) {
+          return of([]);
+        }
+
+        const enrichedRequests = bookings.map(booking => {
+          // Get car owner profile and workshop service in parallel
+          const carOwnerRequest = this.getCarOwnerProfileByBooking(booking.id);
+          const workshopServiceRequest = this.getWorkshopServiceById(booking.workshopServiceId);
+
+          return forkJoin({ carOwner: carOwnerRequest, workshopService: workshopServiceRequest }).pipe(
+            switchMap(({ carOwner, workshopService }) => {
+              // Get the service name from the serviceId in workshopService
+              const serviceId = workshopService?.serviceId;
+              if (serviceId) {
+                return this.getServiceById(serviceId).pipe(
+                  map(service => ({
+                    id: booking.id,
+                    status: booking.status,
+                    appointmentDate: new Date(booking.appointmentDate),
+                    issueDescription: booking.issueDescription,
+                    paymentMethod: booking.paymentMethod,
+                    customerName: carOwner ? `${carOwner.firstName || ''} ${carOwner.lastName || ''}`.trim() || 'Unknown' : 'Unknown',
+                    serviceName: service?.name || workshopService?.name || 'Service',
+                    carId: booking.carId
+                  }))
+                );
+              }
+              return of({
+                id: booking.id,
+                status: booking.status,
+                appointmentDate: new Date(booking.appointmentDate),
+                issueDescription: booking.issueDescription,
+                paymentMethod: booking.paymentMethod,
+                customerName: carOwner ? `${carOwner.firstName || ''} ${carOwner.lastName || ''}`.trim() || 'Unknown' : 'Unknown',
+                serviceName: workshopService?.name || 'Service',
+                carId: booking.carId
+              });
+            }),
+            catchError(() => of({
+              id: booking.id,
+              status: booking.status,
+              appointmentDate: new Date(booking.appointmentDate),
+              issueDescription: booking.issueDescription,
+              paymentMethod: booking.paymentMethod,
+              customerName: 'Unknown',
+              serviceName: 'Service',
+              carId: booking.carId
+            }))
+          );
+        });
+
+        return forkJoin(enrichedRequests);
+      }),
+      catchError(err => {
+        console.error('Error enriching bookings:', err);
+        return of([]);
+      })
+    );
+  }
+
+  /**
+   * Get booked time slots for a specific workshop and date
+   * @param workshopId Workshop profile ID
+   * @param serviceId Service ID
+   * @param date Date in YYYY-MM-DD format
+   */
+  getBookedSlots(workshopId: number, serviceId: number, date: string): Observable<string[]> {
+    return this.http.get<any>(`${this.apiUrl}/Booking/booked-slots`, {
+      params: {
+        workshopId: workshopId.toString(),
+        serviceId: serviceId.toString(),
+        date: date
+      }
+    }).pipe(
+      map(response => {
+        // Assuming response returns array of ISO datetime strings
+        return response.data || response || [];
+      })
+    );
+  }
+
+  /**
+   * Get bookings for a specific car
+   * @param carId Car ID
+   */
+  getBookingsByCar(carId: number): Observable<{
+    success: boolean;
+    message: string;
+    data: Array<{
+      id: number;
+      status: string;
+      appointmentDate: string;
+      issueDescription: string;
+      paymentMethod: string;
+      paidAmount: number;
+      paymentStatus: string;
+      createdAt: string;
+      carId: number;
+      workShopProfileId: number;
+      workshopServiceId: number;
+    }>;
+  }> {
+    return this.http.get<{
+      success: boolean;
+      message: string;
+      data: Array<{
+        id: number;
+        status: string;
+        appointmentDate: string;
+        issueDescription: string;
+        paymentMethod: string;
+        paidAmount: number;
+        paymentStatus: string;
+        createdAt: string;
+        carId: number;
+        workShopProfileId: number;
+        workshopServiceId: number;
+      }>;
+    }>(`${this.apiUrl}/Booking/ByCar/${carId}`);
+  }
+
   // =============== Job Management ===============
-  
+
   getJobs(): Observable<Job[]> {
     return this.jobs$;
   }
@@ -53,7 +326,7 @@ export class BookingService {
   updateJobStatus(jobId: string, status: JobStatus): Observable<Job> {
     const jobs = this.jobsSubject.value;
     const jobIndex = jobs.findIndex(j => j.id === jobId);
-    
+
     if (jobIndex !== -1) {
       jobs[jobIndex] = {
         ...jobs[jobIndex],
@@ -63,14 +336,14 @@ export class BookingService {
       this.jobsSubject.next([...jobs]);
       return of(jobs[jobIndex]);
     }
-    
+
     throw new Error('Job not found');
   }
 
   updateJobStage(jobId: string, stage: Job['stage']): Observable<Job> {
     const jobs = this.jobsSubject.value;
     const jobIndex = jobs.findIndex(j => j.id === jobId);
-    
+
     if (jobIndex !== -1) {
       jobs[jobIndex] = {
         ...jobs[jobIndex],
@@ -80,12 +353,12 @@ export class BookingService {
       this.jobsSubject.next([...jobs]);
       return of(jobs[jobIndex]);
     }
-    
+
     throw new Error('Job not found');
   }
 
   // =============== Quote Management ===============
-  
+
   createQuote(jobId: string, quote: Partial<Quote>): Observable<Quote> {
     // Mock implementation - replace with API call
     const newQuote: Quote = {
@@ -105,7 +378,7 @@ export class BookingService {
 
     const jobs = this.jobsSubject.value;
     const jobIndex = jobs.findIndex(j => j.id === jobId);
-    
+
     if (jobIndex !== -1) {
       jobs[jobIndex] = {
         ...jobs[jobIndex],
@@ -121,7 +394,7 @@ export class BookingService {
   sendQuote(quoteId: string): Observable<Quote> {
     // Mock implementation - replace with API call
     const jobs = this.jobsSubject.value;
-    
+
     for (let job of jobs) {
       if (job.quote?.id === quoteId) {
         job.quote = {
@@ -134,14 +407,14 @@ export class BookingService {
         return of(job.quote);
       }
     }
-    
+
     throw new Error('Quote not found');
   }
 
   approveQuote(quoteId: string): Observable<Quote> {
     // Mock implementation - replace with API call
     const jobs = this.jobsSubject.value;
-    
+
     for (let job of jobs) {
       if (job.quote?.id === quoteId) {
         job.quote = {
@@ -155,12 +428,12 @@ export class BookingService {
         return of(job.quote);
       }
     }
-    
+
     throw new Error('Quote not found');
   }
 
   // =============== Additional Repairs (Upsell) ===============
-  
+
   suggestAdditionalRepair(jobId: string, repair: Partial<AdditionalRepair>): Observable<AdditionalRepair> {
     const newRepair: AdditionalRepair = {
       id: this.generateId(),
@@ -175,7 +448,7 @@ export class BookingService {
 
     const jobs = this.jobsSubject.value;
     const jobIndex = jobs.findIndex(j => j.id === jobId);
-    
+
     if (jobIndex !== -1) {
       jobs[jobIndex] = {
         ...jobs[jobIndex],
@@ -191,7 +464,7 @@ export class BookingService {
   approveAdditionalRepair(jobId: string, repairId: string): Observable<AdditionalRepair> {
     const jobs = this.jobsSubject.value;
     const jobIndex = jobs.findIndex(j => j.id === jobId);
-    
+
     if (jobIndex !== -1) {
       const repairIndex = jobs[jobIndex].additionalRepairs.findIndex(r => r.id === repairId);
       if (repairIndex !== -1) {
@@ -205,12 +478,12 @@ export class BookingService {
         return of(jobs[jobIndex].additionalRepairs[repairIndex]);
       }
     }
-    
+
     throw new Error('Additional repair not found');
   }
 
   // =============== Chat Messages ===============
-  
+
   sendMessage(jobId: string, message: Partial<ChatMessage>): Observable<ChatMessage> {
     const newMessage: ChatMessage = {
       id: this.generateId(),
@@ -224,7 +497,7 @@ export class BookingService {
 
     const jobs = this.jobsSubject.value;
     const jobIndex = jobs.findIndex(j => j.id === jobId);
-    
+
     if (jobIndex !== -1) {
       jobs[jobIndex] = {
         ...jobs[jobIndex],
@@ -238,7 +511,7 @@ export class BookingService {
   }
 
   // =============== Media Upload ===============
-  
+
   uploadMedia(jobId: string, media: Partial<MediaItem>): Observable<MediaItem> {
     const newMedia: MediaItem = {
       id: this.generateId(),
@@ -252,7 +525,7 @@ export class BookingService {
 
     const jobs = this.jobsSubject.value;
     const jobIndex = jobs.findIndex(j => j.id === jobId);
-    
+
     if (jobIndex !== -1) {
       jobs[jobIndex] = {
         ...jobs[jobIndex],
@@ -266,10 +539,10 @@ export class BookingService {
   }
 
   // =============== Dashboard Metrics ===============
-  
+
   getDashboardMetrics(): Observable<DashboardMetrics> {
     const jobs = this.jobsSubject.value;
-    
+
     // Calculate metrics from current jobs
     const metrics: DashboardMetrics = {
       monthlyRevenue: this.calculateMonthlyRevenue(jobs),
@@ -288,7 +561,7 @@ export class BookingService {
   }
 
   // =============== Financial Management ===============
-  
+
   getTransactions(): Observable<Transaction[]> {
     // Mock transactions - replace with API call
     return of(this.generateMockTransactions());
@@ -300,7 +573,7 @@ export class BookingService {
   }
 
   // =============== Helper Methods ===============
-  
+
   private generateId(): string {
     return `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
   }
@@ -308,7 +581,7 @@ export class BookingService {
   private calculateMonthlyRevenue(jobs: Job[]): number {
     const currentMonth = new Date().getMonth();
     const currentYear = new Date().getFullYear();
-    
+
     return jobs
       .filter(job => {
         const jobDate = new Date(job.createdAt);
